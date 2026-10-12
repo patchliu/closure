@@ -73,7 +73,7 @@ def cmd_doctor(args) -> int:
     controller = Controller(args.case)
     controller._emit(
         EventType.ENVIRONMENT_PROBED,
-        {"capabilities": merged.as_dict(), "per_profile": per_profile},
+        {"capabilities": merged.capabilities, "reasons": merged.reasons, "per_profile": per_profile},
     )
     print("== 聚合能力矩阵 ==")
     print(json.dumps(merged.as_dict(), ensure_ascii=False, indent=2))
