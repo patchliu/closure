@@ -42,15 +42,14 @@ def read_record(path: str) -> WorkerRecord | None:
     return WorkerRecord.model_validate_json(open(path, encoding="utf-8").read())
 
 
-def _pid_alive(pid: int | None) -> bool:
+def pid_alive(pid: int | None) -> bool:
     if pid is None:
         return False
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
-        return False
     except OSError:
+        # ESRCH（进程不存在）与 EPERM（存在但属他人）之外均视为不可用。
         return False
 
 
@@ -94,7 +93,3 @@ def launch_worker(executor: Executor, spec: RunSpec, attempt_id: str, work_dir: 
             + "\n"
         )
     return record
-
-
-def pid_alive(pid: int | None) -> bool:
-    return _pid_alive(pid)

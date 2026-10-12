@@ -96,6 +96,7 @@ class Candidate(_Rec):
     candidate_id: str
     parent_variant: str | None = None
     baseline_variant: str
+    hypothesis: str | None = None
     proposal_hash: str | None = None
     source_or_ir_hash: str | None = None
     target_fingerprint: str | None = None

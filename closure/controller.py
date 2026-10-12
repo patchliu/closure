@@ -2,6 +2,9 @@
 
 只有控制器能提交权威状态；worker 写自己的日志/结果包；AI 只提交提案。
 控制器按固定顺序：关联活 worker → 收集结果 → 执行已接受计划 → 申请新提案。
+
+状态贯穿：_emit 返回提交后的最新 State，各步进方法只 replay 一次并传递，
+避免每个事件全链重放。
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .evaluator import Evaluator
+from .executors import LocalExecutor, RunSpec
 from .hashing import sha256, sha256_file
 from .planner import NullPlanner, Planner
 from .schemas import (
@@ -23,7 +27,7 @@ from .schemas import (
     EventType,
     StageStatus,
 )
-from .selection import PromotionContext, promotion_ok
+from .selection import PromotionContext, promotion_ok, route_evidence_level
 from .state import State, StateStore
 
 _VARIANT_PIPELINE = ["validate", "benchmark", "evaluate"]
@@ -72,22 +76,23 @@ class Controller:
             atol=cfg.correctness.atol,
         )
 
-    # ---- 事件提交 ----
-    def _emit(self, type_: EventType, payload: dict) -> None:
+    # ---- 事件提交（唯一权威入口） ----
+    def _emit(self, type_: EventType, payload: dict) -> State:
         self.store.events.append(type_, payload)
-        self.store.write_snapshot(self.store.replay())
+        state = self.store.replay()
+        self.store.write_snapshot(state)
+        return state
 
     # ---- 初始化 / 基线 ----
-    def ensure_initialized(self, state: State) -> None:
+    def ensure_initialized(self, state: State) -> State:
         if state.case_id is None:
             cfg = self.case_config()
-            self._emit(
+            state = self._emit(
                 EventType.CASE_CREATED,
                 {"case_id": cfg.case_id, "budget_limits": cfg.budget.model_dump(exclude={"schema_version"})},
             )
-            state = self.store.replay()
         if state.baseline_variant_id is None:
-            self._emit(
+            state = self._emit(
                 EventType.CANDIDATE_REGISTERED,
                 {
                     "candidate": {
@@ -100,7 +105,8 @@ class Controller:
                     "is_baseline": True,
                 },
             )
-            self._emit(EventType.CANDIDATE_PROMOTED, {"candidate_id": "v000"})
+            state = self._emit(EventType.CANDIDATE_PROMOTED, {"candidate_id": "v000"})
+        return state
 
     # ---- 预算 ----
     def _budget_exhausted(self, state: State) -> str | None:
@@ -126,6 +132,11 @@ class Controller:
             state_seq=state.seq,
             protocol_hash=self.evaluator().protocol_hash(),
             incumbent_id=state.incumbent_id,
+            negated_hypotheses=[
+                c["hypothesis"]
+                for c in state.candidates.values()
+                if c.get("status") == "rejected" and c.get("hypothesis")
+            ],
             remaining_budget=_remaining_budget(state),
             allowed_actions=["propose_variant", "submit_analysis", "request_finish", "inspect"],
         )
@@ -138,24 +149,23 @@ class Controller:
         if state.run_status == "stopped":
             return StepOutcome("done", state, state.stop_reason or "")
         if state.case_id is None or state.baseline_variant_id is None:
-            self.ensure_initialized(state)
-            state = self.store.replay()
+            state = self.ensure_initialized(state)
 
         reason = self._budget_exhausted(state)
         if reason:
-            self._emit(EventType.RUN_STOPPED, {"reason": reason})
-            return StepOutcome("stopped", self.store.replay(), reason)
+            state = self._emit(EventType.RUN_STOPPED, {"reason": reason})
+            return StepOutcome("stopped", state, reason)
 
         cand = self._pending_candidate(state)
         if cand is not None:
-            self._advance_candidate(cand["candidate_id"])
-            return StepOutcome("continue", self.store.replay())
+            state = self._advance_candidate(cand["candidate_id"], state)
+            return StepOutcome("continue", state)
 
         packet = self.build_packet(state)
         proposal = self.planner.decide(packet)
         if proposal is None:
-            self._emit(EventType.RUN_STOPPED, {"reason": "waiting_for_external_input"})
-            return StepOutcome("blocked", self.store.replay(), "waiting_for_external_input")
+            state = self._emit(EventType.RUN_STOPPED, {"reason": "waiting_for_external_input"})
+            return StepOutcome("blocked", state, "waiting_for_external_input")
 
         return self._resolve_proposal(proposal, state)
 
@@ -168,39 +178,39 @@ class Controller:
     # ---- proposal 处理 ----
     def _resolve_proposal(self, proposal: ActionEnvelope, state: State) -> StepOutcome:
         if proposal.expected_state_seq != state.seq:
-            self._emit(
+            state = self._emit(
                 EventType.PROPOSAL_REJECTED,
                 {"proposal_id": proposal.proposal_id, "reason": "STALE_PROPOSAL"},
             )
-            return StepOutcome("continue", self.store.replay(), "STALE_PROPOSAL")
+            return StepOutcome("continue", state, "STALE_PROPOSAL")
 
         content_hash = sha256(proposal.model_dump())
         if proposal.proposal_id in state.accepted_proposals:
             if state.accepted_proposals[proposal.proposal_id] == content_hash:
                 return StepOutcome("continue", state, "already_accepted")
-            self._emit(
+            state = self._emit(
                 EventType.PROPOSAL_REJECTED,
                 {"proposal_id": proposal.proposal_id, "reason": "duplicate_id_conflict"},
             )
-            return StepOutcome("continue", self.store.replay(), "duplicate_id_conflict")
+            return StepOutcome("continue", state, "duplicate_id_conflict")
 
-        self._emit(
+        state = self._emit(
             EventType.PROPOSAL_ACCEPTED,
             {"proposal": proposal.model_dump(), "plan_hash": self._plan_hash(proposal)},
         )
 
         action = proposal.action
         if action.value == "propose_variant":
-            self._register_variant(proposal)
+            state = self._register_variant(proposal, state)
         elif action.value == "request_finish":
-            if self._goal_met(self.store.replay()):
-                self._emit(EventType.RUN_STOPPED, {"reason": "finished"})
-                return StepOutcome("stopped", self.store.replay(), "finished")
-            return StepOutcome("continue", self.store.replay(), "goal_not_met")
+            if self._goal_met(state):
+                state = self._emit(EventType.RUN_STOPPED, {"reason": "finished"})
+                return StepOutcome("stopped", state, "finished")
+            return StepOutcome("continue", state, "goal_not_met")
         elif action.value == "submit_analysis":
             self._save_analysis(proposal)
         # inspect / request_measurement / propose_compiler_patch：首版记录，不改状态
-        return StepOutcome("continue", self.store.replay())
+        return StepOutcome("continue", state)
 
     def _plan_hash(self, proposal: ActionEnvelope) -> str:
         cfg = self.case_config()
@@ -220,21 +230,22 @@ class Controller:
                 return True
         return False
 
-    def _register_variant(self, proposal: ActionEnvelope) -> None:
-        state = self.store.replay()
-        vid = f"v{len(state.candidates):03d}"
+    def _register_variant(self, proposal: ActionEnvelope, state: State) -> State:
         payload = proposal.payload
+        vid = f"v{len(state.candidates):03d}"
+        cfg = self.case_config()
         evaluator = self.evaluator()
         candidate = {
             "candidate_id": vid,
             "parent_variant": payload.parent_variant,
             "baseline_variant": payload.baseline,
+            "hypothesis": payload.hypothesis,
             "proposal_hash": sha256(proposal.model_dump()),
             "source_or_ir_hash": sha256({"variant": vid, "change": payload.change}),
             "evaluation_protocol_hash": evaluator.protocol_hash(),
             "scope": "local-fixture",
             "status": "proposed",
-            "evidence_level": "E1",
+            "evidence_level": route_evidence_level(cfg.search.mode, self._device_available(state)).value,
             "stages": {
                 "compile": "skipped",
                 "simulate": "blocked",
@@ -244,23 +255,26 @@ class Controller:
             },
             "objective": {"latency_ratio_to_baseline": None},
         }
-        self._emit(EventType.CANDIDATE_REGISTERED, {"candidate": candidate, "is_baseline": False})
+        return self._emit(EventType.CANDIDATE_REGISTERED, {"candidate": candidate, "is_baseline": False})
+
+    def _device_available(self, state: State) -> bool:
+        """环境能力矩阵中 benchmark 是否已探测为 supported（doctor 发射 environment.probed）。"""
+        return (state.environment or {}).get("benchmark") == "supported"
 
     # ---- 候选推进 ----
-    def _advance_candidate(self, cid: str) -> None:
-        state = self.store.replay()
+    def _advance_candidate(self, cid: str, state: State) -> State:
         cand = state.candidates[cid]
         stages = cand.get("stages", {})
         for stage in _VARIANT_PIPELINE:
             if stages.get(stage) != "succeeded":
-                self._run_stage(cid, stage)
-                return
+                return self._run_stage(cid, stage, state)
+        return state
 
-    def _run_stage(self, cid: str, stage: str) -> None:
-        self._emit(EventType.STAGE_STARTED, {"stage": stage, "candidate_id": cid})
+    def _run_stage(self, cid: str, stage: str, state: State) -> State:
+        state = self._emit(EventType.STAGE_STARTED, {"stage": stage, "candidate_id": cid})
         if stage == "validate":
-            ok, checks = self._validate_correctness(cid)
-            self._emit(
+            ok, checks = self._validate_correctness()
+            state = self._emit(
                 EventType.STAGE_RESULT,
                 {
                     "stage": stage,
@@ -271,11 +285,11 @@ class Controller:
                 },
             )
             if not ok:
-                self._emit(EventType.CANDIDATE_REJECTED, {"candidate_id": cid, "reason": "CORRECTNESS_FAILED"})
+                state = self._emit(EventType.CANDIDATE_REJECTED, {"candidate_id": cid, "reason": "CORRECTNESS_FAILED"})
         elif stage == "benchmark":
-            baseline_median, candidate_median = self._benchmark(cid)
+            baseline_median, candidate_median = self._benchmark()
             ratio = Evaluator.latency_ratio(candidate_median, baseline_median) if baseline_median > 0 else 0.0
-            self._emit(
+            state = self._emit(
                 EventType.STAGE_RESULT,
                 {
                     "stage": stage,
@@ -286,10 +300,10 @@ class Controller:
                 },
             )
         elif stage == "evaluate":
-            self._evaluate(cid)
+            state = self._evaluate(cid, state)
+        return state
 
-    def _evaluate(self, cid: str) -> None:
-        state = self.store.replay()
+    def _evaluate(self, cid: str, state: State) -> State:
         cand = state.candidates[cid]
         evaluator = self.evaluator()
         # 独立确认：benchmark 中 candidate < baseline（比率 > 0）
@@ -304,17 +318,16 @@ class Controller:
             mandatory_artifacts_verified=True,
         )
         ok, failed = promotion_ok(Candidate(**cand), ctx)
-        self._emit(
+        state = self._emit(
             EventType.STAGE_RESULT,
             {"stage": "evaluate", "status": StageStatus.SUCCEEDED.value if ok else StageStatus.FAILED.value, "candidate_id": cid, "checks": {"failed": failed}},
         )
         if ok:
-            self._emit(EventType.CANDIDATE_PROMOTED, {"candidate_id": cid})
-        else:
-            self._emit(EventType.CANDIDATE_REJECTED, {"candidate_id": cid, "reason": "promotion_failed: " + ",".join(failed)})
+            return self._emit(EventType.CANDIDATE_PROMOTED, {"candidate_id": cid})
+        return self._emit(EventType.CANDIDATE_REJECTED, {"candidate_id": cid, "reason": "promotion_failed: " + ",".join(failed)})
 
     # ---- 本地数值 fixture 运行 ----
-    def _validate_correctness(self, _cid: str) -> tuple[bool, dict]:
+    def _validate_correctness(self) -> tuple[bool, dict]:
         cfg = self.case_config()
         evaluator = self.evaluator()
         ref = self._run_python(cfg.correctness.reference, [])
@@ -324,7 +337,7 @@ class Controller:
         ok = evaluator.check_correctness(ref.get("values"), cand.get("values"))
         return ok, {"correctness": "pass" if ok else "fail"}
 
-    def _benchmark(self, _cid: str) -> tuple[float, float]:
+    def _benchmark(self) -> tuple[float, float]:
         cfg = self.case_config()
         n = 3
         baseline = [self._run_python(cfg.entry, ["--mode", "baseline"])["latency_ms"] for _ in range(n)]
@@ -335,8 +348,6 @@ class Controller:
         out = self.paths.runs_dir / ".tmp" / f"{sha256(script_rel + json.dumps(extra))[:12]}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         argv = [sys.executable, str(self.paths.root / script_rel), *extra, "--out", str(out)]
-        from .executors import LocalExecutor, RunSpec
-
         result = LocalExecutor().run(RunSpec(argv=argv, cwd=str(self.paths.root), log_dir=str(out.parent)))
         if result.exit_code != 0 or not out.exists():
             return None

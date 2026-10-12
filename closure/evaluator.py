@@ -40,17 +40,6 @@ class Evaluator:
         self.rtol = rtol
         self.atol = atol
 
-    @classmethod
-    def from_config(cls, config) -> "Evaluator":
-        if config.correctness is None or config.evaluation is None:
-            raise ValueError("EVALUATION_CONFIG_MISSING")
-        return cls(
-            protocol=config.evaluation.protocol,
-            reference_hash=None,
-            rtol=config.correctness.rtol,
-            atol=config.correctness.atol,
-        )
-
     def protocol_hash(self) -> str:
         return sha256(
             {
