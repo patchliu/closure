@@ -127,6 +127,8 @@ def _on_candidate_rejected(state: State, p: dict) -> None:
 def _on_budget_adjusted(state: State, p: dict) -> None:
     for k, v in (p.get("limits") or {}).items():
         state.budget_limited[k] = v
+    for k, v in (p.get("used") or {}).items():
+        state.budget_used[k] = state.budget_used.get(k, 0) + v
 
 
 def _on_run_stopped(state: State, p: dict) -> None:

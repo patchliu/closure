@@ -243,6 +243,23 @@ def test_promote_unknown_candidate_does_not_crash_replay():
     assert state.candidates == {}
 
 
+# 6b. 墙钟预算跨进程累积，resume 不重置（设计 25.2 条 6）
+def test_wall_budget_persists_across_resume(case_dir):
+    content = (case_dir / "case.toml").read_text(encoding="utf-8")
+    (case_dir / "case.toml").write_text(
+        content.replace("max_wall_seconds = 7200", "max_wall_seconds = 5"), encoding="utf-8"
+    )
+    c1 = Controller(case_dir, planner=ReplayPlanner([]))
+    c1.ensure_initialized(c1.store.replay())
+    c1.record_wall_usage()
+    assert c1.store.replay().budget_used.get("wall_seconds", 0) > 0
+    # 人为放大已落盘的墙钟消耗，模拟上一进程长跑
+    c1._emit(EventType.BUDGET_ADJUSTED, {"used": {"wall_seconds": 5.0}})
+    # 新进程：_started_at 归零，但持久化的消耗必须继续生效
+    c2 = Controller(case_dir)
+    assert c2._budget_exhausted(c2.store.replay()) == "max_wall_seconds"
+
+
 # 11. 不支持能力返回明确错误与最小缺口，不偷偷绕过
 def test_unsupported_capability_clear_error():
     local = LocalExecutor().probe()

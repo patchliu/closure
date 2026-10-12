@@ -121,9 +121,26 @@ class Controller:
             if limit is not None and used.get(key, 0) >= int(limit):
                 return reason
         max_wall = limits.get("max_wall_seconds")
-        if max_wall is not None and (time.monotonic() - self._started_at) >= int(max_wall):
-            return "max_wall_seconds"
+        if max_wall is not None:
+            wall = state.budget_used.get("wall_seconds", 0) + (time.monotonic() - self._started_at)
+            if wall >= int(max_wall):
+                return "max_wall_seconds"
         return None
+
+    # ---- 预算记录 ----
+    def adjust_budget(self, limits: dict) -> State:
+        """调整预算上限（设计 7.3：记录事件，不追溯更改已有成本）。"""
+        return self._emit(EventType.BUDGET_ADJUSTED, {"limits": limits})
+
+    def record_wall_usage(self) -> State:
+        """把本进程已消耗的墙钟时间落盘，resume 后墙钟预算不重置。
+
+        总预算必须包含失败与基础设施故障的实际消耗（设计 25.2 条 6）；
+        墙钟是跨进程唯一需要累积记录的预算项。
+        """
+        elapsed = round(time.monotonic() - self._started_at, 6)
+        self._started_at = time.monotonic()
+        return self._emit(EventType.BUDGET_ADJUSTED, {"used": {"wall_seconds": elapsed}})
 
     # ---- decision packet ----
     def build_packet(self, state: State) -> DecisionPacket:

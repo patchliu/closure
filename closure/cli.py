@@ -14,7 +14,6 @@ from .knowledge import KnowledgeStore, build_dossier
 from .migrate import export_bundle, import_bundle
 from .planner import ReplayPlanner
 from .report import write_report
-from .schemas.enums import EventType
 from .templates import CASE_TOML, HARNESS_PY, PROFILE_TOML, REFERENCE_PY
 
 
@@ -56,15 +55,18 @@ def cmd_doctor(args) -> int:
 def _run_loop(case_dir: str, proposals: list[dict], max_candidates: int | None, max_steps: int) -> int:
     controller = Controller(case_dir, planner=ReplayPlanner(proposals))
     state = controller.store.replay()
-    controller.ensure_initialized(state)
+    state = controller.ensure_initialized(state)
     if max_candidates is not None:
-        controller.store.events.append(EventType.BUDGET_ADJUSTED, {"limits": {"max_candidates": max_candidates}})
-        controller.store.write_snapshot(controller.store.replay())
+        controller.adjust_budget({"max_candidates": max_candidates})
 
-    for _ in range(max_steps):
-        r = controller.run_step()
-        if r.status in ("stopped", "done"):
-            break
+    try:
+        for _ in range(max_steps):
+            r = controller.run_step()
+            if r.status in ("stopped", "done"):
+                break
+    finally:
+        # 墙钟预算跨进程累积，resume 不会重置（设计 25.2 条 6）。
+        controller.record_wall_usage()
     state = controller.store.replay()
     write_report(state, Path(case_dir) / "report.md")
     print(f"run 结束：run_status={state.run_status}" + (f"，原因={state.stop_reason}" if state.stop_reason else ""))
@@ -104,8 +106,7 @@ def cmd_report(args) -> int:
 def cmd_freeze(args) -> int:
     # 首版：仅落盘当前快照，不再推进；不迁移活进程内存。
     controller = Controller(args.case)
-    state = controller.store.replay()
-    controller.store.write_snapshot(state)
+    controller.record_wall_usage()  # _emit 内部已原子更新快照
     print("已冻结：state.json 已封存当前快照")
     return 0
 
