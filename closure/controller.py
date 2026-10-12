@@ -267,7 +267,7 @@ class Controller:
                     "status": StageStatus.SUCCEEDED.value if ok else StageStatus.FAILED.value,
                     "candidate_id": cid,
                     "checks": checks,
-                    "cost": {"runs": 1},
+                    "cost": {"runs": 2},  # reference + candidate 各一次子进程
                 },
             )
             if not ok:
@@ -282,7 +282,7 @@ class Controller:
                     "status": StageStatus.SUCCEEDED.value,
                     "candidate_id": cid,
                     "checks": {"baseline_median": baseline_median, "candidate_median": candidate_median, "ratio": ratio},
-                    "cost": {"runs": 2},
+                    "cost": {"runs": 6},  # baseline/candidate 各 3 次采样子进程
                 },
             )
         elif stage == "evaluate":

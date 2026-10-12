@@ -113,7 +113,8 @@ def _on_candidate_promoted(state: State, p: dict) -> None:
     cid = p.get("candidate_id")
     if cid:
         state.incumbent_id = cid
-        state.candidates[cid]["status"] = "confirmed"
+        if cid in state.candidates:
+            state.candidates[cid]["status"] = "confirmed"
 
 
 def _on_candidate_rejected(state: State, p: dict) -> None:

@@ -235,6 +235,14 @@ def test_unverified_sync_not_complete():
     assert state.facts["sync"]["verified"] == "unverified"
 
 
+def test_promote_unknown_candidate_does_not_crash_replay():
+    # 事件链中可能出现指向未注册候选的 promote（迁移/手工合并），
+    # 重放必须不崩溃，且 incumbent 指针仍可推进。
+    state = reduce([_ev(EventType.CANDIDATE_PROMOTED, 1, {"candidate_id": "ghost"})])
+    assert state.incumbent_id == "ghost"
+    assert state.candidates == {}
+
+
 # 11. 不支持能力返回明确错误与最小缺口，不偷偷绕过
 def test_unsupported_capability_clear_error():
     local = LocalExecutor().probe()
