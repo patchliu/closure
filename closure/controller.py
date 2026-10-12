@@ -226,7 +226,9 @@ class Controller:
             return StepOutcome("continue", state, "goal_not_met")
         elif action.value == "submit_analysis":
             self._save_analysis(proposal)
-        # inspect / request_measurement / propose_compiler_patch：首版记录，不改状态
+        elif action.value == "inspect":
+            self._inspect(proposal, state)
+        # request_measurement / propose_compiler_patch：首版记录，不改状态
         return StepOutcome("continue", state)
 
     def _plan_hash(self, proposal: ActionEnvelope) -> str:
@@ -375,6 +377,47 @@ class Controller:
         self.paths.analysis_dir.mkdir(parents=True, exist_ok=True)
         path = self.paths.analysis_dir / f"{proposal.proposal_id}.json"
         path.write_text(json.dumps(proposal.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # ---- inspect：有界只读（设计 7.1 / T5 bounded inspect） ----
+    _INSPECT_MAX_BYTES = 64 * 1024
+
+    def _inspect(self, proposal: ActionEnvelope, state: State) -> None:
+        """按 artifact ID 或 case 内相对路径做有界只读，结果存 analysis/。
+
+        越出 case 根目录的路径一律拒绝；未注册且不存在的 ID 返回
+        ARTIFACT_MISSING，不猜内容。
+        """
+        payload = proposal.payload
+        record: dict = {
+            "proposal_id": proposal.proposal_id,
+            "artifact_id": payload.artifact_id,
+            "purpose": payload.purpose,
+            "found": False,
+            "content": None,
+        }
+        target: Path | None = None
+        art = state.artifacts.get(payload.artifact_id)
+        if art:
+            target = Path(art["path"])
+            record["found"] = True
+        else:
+            candidate = (self.paths.root / payload.artifact_id).resolve()
+            if candidate.is_relative_to(self.paths.root.resolve()) and candidate.is_file():
+                target = candidate
+                record["found"] = True
+        if target is None:
+            record["error"] = "ARTIFACT_MISSING"
+        else:
+            start = max(0, payload.start or 0)
+            limit = min(max(1, payload.limit or self._INSPECT_MAX_BYTES), self._INSPECT_MAX_BYTES)
+            with open(target, "rb") as f:
+                f.seek(start)
+                data = f.read(limit)
+            record["content"] = data.decode("utf-8", errors="replace")
+            record["truncated"] = target.stat().st_size > start + len(data)
+        self.paths.analysis_dir.mkdir(parents=True, exist_ok=True)
+        path = self.paths.analysis_dir / f"inspect-{proposal.proposal_id}.json"
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _remaining_budget(state: State) -> dict:

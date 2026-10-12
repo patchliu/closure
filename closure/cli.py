@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 
 from .adapters.ascend import AscendAdapter
-from .artifacts import ArtifactManifest, gc_plan
+from .artifacts import ArtifactManifest, apply_gc, gc_plan
 from .controller import Controller
 from .executors import ProbeResult, build_executor, merge_capabilities
 from .knowledge import KnowledgeStore, build_dossier
@@ -31,11 +31,11 @@ def cmd_init(args) -> int:
     (root / "profiles").mkdir(parents=True, exist_ok=True)
     (root / "input").mkdir(parents=True, exist_ok=True)
     (root / "case.toml").write_text(CASE_TOML.format(case_id=args.case_id), encoding="utf-8")
-    (root / "profiles" / "mac-sim.toml").write_text(PROFILE_TOML.format(name="mac-sim"), encoding="utf-8")
+    (root / "profiles" / "local.toml").write_text(PROFILE_TOML.format(name="local"), encoding="utf-8")
     (root / "input" / "reference.py").write_text(REFERENCE_PY, encoding="utf-8")
     (root / "input" / "harness.py").write_text(HARNESS_PY, encoding="utf-8")
     print(f"已初始化 case：{root}")
-    print("  - case.toml / profiles/mac-sim.toml")
+    print("  - case.toml / profiles/local.toml（与 case.roles 的 validate/benchmark=local 对应）")
     print("  - input/reference.py、input/harness.py（本地数值 fixture，非 Ascend）")
     return 0
 
@@ -122,6 +122,18 @@ def cmd_status(args) -> int:
     out.append(f"baseline: {state.baseline_variant_id}")
     out.append(f"incumbent: {state.incumbent_id}")
     out.append("stages: " + ", ".join(f"{k}={v}" for k, v in sorted(state.stages.items())))
+    if state.candidates:
+        out.append(
+            "candidates: " + ", ".join(f"{cid}={c.get('status')}" for cid, c in sorted(state.candidates.items()))
+        )
+    if state.budget_limited:
+        used = state.budget_used
+        out.append(
+            "budget: "
+            + ", ".join(
+                f"{k} {used.get(k.replace('max_', ''), 0)}/{v}" for k, v in sorted(state.budget_limited.items())
+            )
+        )
     print("\n".join(out))
     return 0
 
@@ -159,7 +171,11 @@ def cmd_import(args) -> int:
 def cmd_gc(args) -> int:
     manifest = ArtifactManifest(Path(args.case) / "artifact-manifest.json")
     removable = gc_plan(manifest, set())
-    print(f"可清理产物：{len(removable)} 项（dry-run）")
+    if args.apply:
+        removed = apply_gc(manifest, removable)
+        print(f"已清理 {removed} 项产物")
+        return 0
+    print(f"可清理产物：{len(removable)} 项（dry-run，--apply 执行）")
     for a in removable:
         print(f"  - {a.id} ({a.retention.value}) {a.path}")
     return 0
@@ -228,8 +244,9 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--bundle", required=True)
     imp.add_argument("--case", required=True)
 
-    gc = sub.add_parser("gc", help="产物 GC（dry-run）")
+    gc = sub.add_parser("gc", help="产物 GC（默认 dry-run）")
     gc.add_argument("--case", required=True)
+    gc.add_argument("--apply", action="store_true", help="执行清理（默认 dry-run）")
 
     cp = sub.add_parser("compiler-plan", help="生成 compiler dossier")
     cp.add_argument("--case", required=True)

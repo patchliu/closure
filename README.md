@@ -22,6 +22,7 @@ closure doctor --case demo
 closure run --case demo --proposals proposals.json
 closure status --case demo
 closure report --case demo
+closure gc --case demo            # dry-run；--apply 执行清理
 ```
 
 其中 `proposals.json` 是 replay planner 的预录提案列表，例如：

@@ -69,13 +69,14 @@ def gc_plan(manifest: ArtifactManifest, pinned_ids: set[str]) -> list[Artifact]:
 
 
 def apply_gc(manifest: ArtifactManifest, removable: list[Artifact]) -> int:
-    manifest_path = manifest.load()
-    keep = {a.id for a in manifest_path if a not in removable}
+    """按删除计划真正清理：删除文件并从 manifest 移除对应条目。"""
+    artifacts = manifest.load()
+    remove_ids = {a.id for a in removable}
     removed = 0
     for a in removable:
         p = Path(a.path)
         if p.exists():
             p.unlink()
             removed += 1
-    manifest.save([a for a in manifest_path if a.id in keep])
+    manifest.save([a for a in artifacts if a.id not in remove_ids])
     return removed

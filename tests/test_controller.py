@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from closure.controller import Controller
@@ -81,6 +83,70 @@ def test_failed_candidate_does_not_replace_incumbent(case_dir):
     controller.store.events.append(EventType.CANDIDATE_REJECTED, {"candidate_id": "v999", "reason": "CORRECTNESS_FAILED"})
     state2 = controller.store.replay()
     assert state2.incumbent_id == "v000"
+
+
+def inspect_proposal(pid, artifact_id, purpose="查看配置", start=None, limit=None):
+    payload = {"artifact_id": artifact_id, "purpose": purpose}
+    if start is not None:
+        payload["start"] = start
+    if limit is not None:
+        payload["limit"] = limit
+    return {
+        "proposal_id": pid,
+        "packet_hash": "__stub__",
+        "expected_state_seq": 0,
+        "action": "inspect",
+        "payload": payload,
+    }
+
+
+def test_inspect_reads_bounded_case_file(case_dir):
+    controller = Controller(case_dir, planner=ReplayPlanner([inspect_proposal("p100", "case.toml")]))
+    run_until_terminal(controller)
+    record = json.loads((case_dir / "analysis" / "inspect-p100.json").read_text(encoding="utf-8"))
+    assert record["found"] is True
+    assert "case_id" in record["content"]
+    assert record["truncated"] is False
+
+
+def test_inspect_rejects_path_escape_and_missing(case_dir):
+    controller = Controller(
+        case_dir,
+        planner=ReplayPlanner(
+            [
+                inspect_proposal("p101", "../outside.txt"),
+                inspect_proposal("p102", "no-such-file.toml"),
+                inspect_proposal("p103", "case.toml", start=5, limit=3),
+            ]
+        ),
+    )
+    run_until_terminal(controller)
+    esc = json.loads((case_dir / "analysis" / "inspect-p101.json").read_text(encoding="utf-8"))
+    assert esc["found"] is False and esc["error"] == "ARTIFACT_MISSING"
+    missing = json.loads((case_dir / "analysis" / "inspect-p102.json").read_text(encoding="utf-8"))
+    assert missing["found"] is False and missing["error"] == "ARTIFACT_MISSING"
+    bounded = json.loads((case_dir / "analysis" / "inspect-p103.json").read_text(encoding="utf-8"))
+    assert len(bounded["content"]) == 3
+    assert bounded["truncated"] is True
+
+
+def test_gc_apply_removes_scratch(case_dir):
+    from closure.artifacts import ArtifactManifest, apply_gc, gc_plan
+    from closure.schemas import RetentionLevel
+
+    m = ArtifactManifest(str(case_dir / "artifact-manifest.json"))
+    scratch = case_dir / "scratch.log"
+    scratch.write_text("tmp", encoding="utf-8")
+    keep = case_dir / "evidence.log"
+    keep.write_text("keep", encoding="utf-8")
+    m.seal("scratch", scratch, "log", RetentionLevel.SCRATCH)
+    m.seal("evidence", keep, "log", RetentionLevel.EVIDENCE)
+    removable = gc_plan(m, pinned_ids=set())
+    assert {a.id for a in removable} == {"scratch"}
+    assert apply_gc(m, removable) == 1
+    assert not scratch.exists()
+    assert keep.exists()
+    assert [a.id for a in m.load()] == ["evidence"]
 
 
 def test_state_snapshot_deleted_rebuilt_after_run(case_dir):
