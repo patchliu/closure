@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -106,25 +107,37 @@ class LocalExecutor(Executor):
             os.makedirs(spec.log_dir, exist_ok=True)
             stdout_path = os.path.join(spec.log_dir, "stdout.log")
             stderr_path = os.path.join(spec.log_dir, "stderr.log")
-        stdout_f = open(stdout_path, "wb") if stdout_path else None
-        stderr_f = open(stderr_path, "wb") if stderr_path else None
+        stdout_f = open(stdout_path, "wb") if stdout_path else subprocess.DEVNULL
+        stderr_f = open(stderr_path, "wb") if stderr_path else subprocess.DEVNULL
+        opened = [f for f in (stdout_f, stderr_f) if f is not subprocess.DEVNULL]
+        started = time.monotonic()
         try:
             proc = subprocess.run(
                 [str(a) for a in spec.argv],
                 cwd=spec.cwd,
                 env=spec.env,
-                stdout=stdout_f or subprocess.PIPE,
-                stderr=stderr_f or subprocess.PIPE,
+                stdout=stdout_f,
+                stderr=stderr_f,
                 timeout=spec.timeout_seconds,
             )
-            return RunResult(exit_code=proc.returncode, stdout_path=stdout_path, stderr_path=stderr_path)
+            return RunResult(
+                exit_code=proc.returncode,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                duration_seconds=time.monotonic() - started,
+            )
         except subprocess.TimeoutExpired:
-            return RunResult(exit_code=-1, stdout_path=stdout_path, stderr_path=stderr_path, timed_out=True)
+            return RunResult(
+                exit_code=-1,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                signal="SIGKILL",
+                timed_out=True,
+                duration_seconds=time.monotonic() - started,
+            )
         finally:
-            if stdout_f:
-                stdout_f.close()
-            if stderr_f:
-                stderr_f.close()
+            for f in opened:
+                f.close()
 
 
 class SshExecutor(Executor):
