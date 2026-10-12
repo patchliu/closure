@@ -50,7 +50,8 @@ def _on_case_created(state: State, p: dict) -> None:
 
 
 def _on_environment_probed(state: State, p: dict) -> None:
-    state.environment = p.get("capabilities", {})
+    # p = {"capabilities": 聚合矩阵, "per_profile": {name: probe}}
+    state.environment = p
 
 
 def _on_proposal_accepted(state: State, p: dict) -> None:

@@ -4,16 +4,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 from .adapters.ascend import AscendAdapter
 from .artifacts import ArtifactManifest, gc_plan
 from .controller import Controller
-from .executors import build_executor
+from .executors import ProbeResult, build_executor, merge_capabilities
 from .knowledge import KnowledgeStore, build_dossier
 from .migrate import export_bundle, import_bundle
 from .planner import ReplayPlanner
 from .report import write_report
+from .schemas import EventType, Profile
 from .templates import CASE_TOML, HARNESS_PY, PROFILE_TOML, REFERENCE_PY
 
 
@@ -38,17 +40,46 @@ def cmd_init(args) -> int:
     return 0
 
 
+def _load_profiles(root: Path) -> list[Profile]:
+    profiles = []
+    for p in sorted((root / "profiles").glob("*.toml")):
+        profiles.append(Profile.model_validate(tomllib.loads(p.read_text(encoding="utf-8"))))
+    return profiles
+
+
 def cmd_doctor(args) -> int:
     root = Path(args.case)
     if not (root / "case.toml").exists():
         print("未找到 case.toml，先运行 `closure init --case ...`", file=sys.stderr)
         return 1
-    asc = AscendAdapter()
-    local = build_executor("local")
-    print("== Ascend 工具链 ==\n")
-    print(json.dumps(asc.probe().as_dict(), ensure_ascii=False, indent=2))
-    print("\n== 本地执行能力 ==\n")
-    print(json.dumps(local.probe().as_dict(), ensure_ascii=False, indent=2))
+    probes: list[ProbeResult] = []
+    per_profile: dict[str, dict] = {}
+    asc = AscendAdapter().probe()
+    asc_dict = asc.as_dict()
+    probes.append(ProbeResult("ascend", {k: v for k, v in asc_dict.items() if k != "reasons"}, asc.reasons))
+    per_profile["ascend"] = asc_dict
+    for profile in _load_profiles(root):
+        ex = build_executor(profile.transport.value, ssh_alias=profile.ssh_alias, container=profile.container)
+        probe = ex.probe()
+        probes.append(probe)
+        per_profile[profile.name] = probe.as_dict()
+    # 本机执行能力无条件纳入：控制器所在机器始终是 local 候选执行位置
+    local = build_executor("local").probe()
+    probes.append(local)
+    per_profile["local"] = local.as_dict()
+    merged = merge_capabilities(probes)
+
+    # doctor 结果落盘为 environment.probed 事件：证据分级与状态展示都引用它（设计 5.2）。
+    controller = Controller(args.case)
+    controller._emit(
+        EventType.ENVIRONMENT_PROBED,
+        {"capabilities": merged.as_dict(), "per_profile": per_profile},
+    )
+    print("== 聚合能力矩阵 ==")
+    print(json.dumps(merged.as_dict(), ensure_ascii=False, indent=2))
+    for name, probe in per_profile.items():
+        print(f"\n== profile: {name} ==")
+        print(json.dumps(probe, ensure_ascii=False, indent=2))
     return 0
 
 

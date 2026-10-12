@@ -275,8 +275,9 @@ class Controller:
         return self._emit(EventType.CANDIDATE_REGISTERED, {"candidate": candidate, "is_baseline": False})
 
     def _device_available(self, state: State) -> bool:
-        """环境能力矩阵中 benchmark 是否已探测为 supported（doctor 发射 environment.probed）。"""
-        return (state.environment or {}).get("benchmark") == "supported"
+        """聚合能力矩阵中 benchmark 是否已探测为 supported（doctor 发射 environment.probed）。"""
+        caps = (state.environment or {}).get("capabilities", {})
+        return caps.get("benchmark") == "supported"
 
     # ---- 候选推进 ----
     def _advance_candidate(self, cid: str, state: State) -> State:

@@ -262,6 +262,22 @@ def test_wall_budget_persists_across_resume(case_dir):
 
 # 11. 不支持能力返回明确错误与最小缺口，不偷偷绕过
 def test_unsupported_capability_clear_error():
+    from closure.executors import merge_capabilities
+    from closure.executors import ProbeResult as PR
+
+    merged = merge_capabilities(
+        [
+            PR("a", {"compile": "unsupported"}, {}),
+            PR("b", {"compile": "unknown"}, {"compile": "未烟测"}),
+        ]
+    )
+    assert merged.capabilities["compile"] == "unknown"
+    supported = merge_capabilities(
+        [PR("a", {"compile": "unsupported"}, {"compile": "x"}), PR("b", {"compile": "supported"}, {})]
+    )
+    assert supported.capabilities["compile"] == "supported"
+    assert "compile" not in supported.reasons  # supported 项不保留缺口理由
+
     local = LocalExecutor().probe()
     assert local.capabilities["compile"] == "unsupported"
     assert local.reasons["compile"]
@@ -271,6 +287,17 @@ def test_unsupported_capability_clear_error():
     with pytest.raises(UnsupportedError) as ei:
         DockerExecutor().run(None)
     assert ei.value.reason
+
+
+def test_doctor_records_environment_event(case_dir):
+    from closure.cli import main
+
+    assert main(["doctor", "--case", str(case_dir)]) == 0
+    controller = Controller(case_dir)
+    state = controller.store.replay()
+    assert "capabilities" in state.environment
+    # 本机 Python 可用 → 聚合矩阵的 correctness 应为 supported
+    assert state.environment["capabilities"]["correctness"] == "supported"
 
 
 # 12. 同一锁定 packet/proposal/config 的解析不依赖模型品牌

@@ -186,3 +186,20 @@ def build_executor(transport: str, ssh_alias: str | None = None, container: str 
     if transport == "docker":
         return DockerExecutor(container)
     raise ValueError(f"未知 transport: {transport}")
+
+
+def merge_capabilities(probes: list[ProbeResult]) -> ProbeResult:
+    """聚合一组 probe 的能力矩阵：任一 supported 则 supported，其次 unknown，否则 unsupported。
+
+    仅对非 supported 能力保留缺口原因，supported 项不再附过期理由。
+    """
+    caps = {k: UNSUPPORTED for k in CAPABILITY_KEYS}
+    reasons: dict[str, str] = {}
+    for p in probes:
+        for k, v in p.capabilities.items():
+            if v == SUPPORTED or (v == UNKNOWN and caps.get(k) != SUPPORTED):
+                caps[k] = v
+        for k, r in p.reasons.items():
+            reasons.setdefault(k, r)
+    reasons = {k: r for k, r in reasons.items() if caps.get(k) != SUPPORTED}
+    return ProbeResult("merged", caps, reasons)
